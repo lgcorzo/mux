@@ -450,6 +450,12 @@ type RouteMatch struct {
 	// It is set to ErrMethodMismatch if there is a mismatch in
 	// the request method and route method
 	MatchErr error
+
+	// Scratch space shared by the routes evaluated during one match. A
+	// RouteMatch is valid for a single Match call against a single request;
+	// reusing one across requests already yields a stale Route, Handler, Vars
+	// and MatchErr, and would also serve a stale path here.
+	pathMemo pathMemo
 }
 
 type contextKey int

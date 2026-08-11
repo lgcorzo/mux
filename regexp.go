@@ -155,6 +155,11 @@ func newRouteRegexp(tpl string, typ regexpType, options routeRegexpOptions) (*ro
 		reverse.WriteByte('/')
 	}
 
+	// A template without variables compiles to an anchored, fully quoted
+	// literal, so matching it reduces to a string comparison. raw is the whole
+	// template here, already trimmed of a strictSlash trailing slash.
+	isLiteral := len(idxs) == 0 && typ != regexpTypeQuery
+
 	// Done!
 	return &routeRegexp{
 		template:         template,
@@ -162,6 +167,10 @@ func newRouteRegexp(tpl string, typ regexpType, options routeRegexpOptions) (*ro
 		regexpType:       typ,
 		options:          options,
 		regexp:           reg,
+		pattern:          patternStr,
+		isLiteral:        isLiteral,
+		literal:          raw,
+		matchesEmpty:     reg.MatchString(""),
 		reverse:          reverse.String(),
 		varsN:            varsN,
 		varsR:            varsR,
@@ -183,6 +192,18 @@ type routeRegexp struct {
 	options routeRegexpOptions
 	// Expanded regexp.
 	regexp *regexp.Regexp
+	// The source pattern of regexp. Routes that share a template compile to
+	// the same pattern, which is what lets pathMemo reuse a match result
+	// across them.
+	pattern string
+	// Set when the template has no variables, so the compiled regexp is an
+	// anchored literal and matching reduces to a string comparison against
+	// literal (the template, minus any strictSlash trailing slash).
+	isLiteral bool
+	literal   string
+	// Whether regexp matches the empty string, so that matchQueryString can
+	// answer without executing it when the query key is absent.
+	matchesEmpty bool
 	// Reverse template.
 	reverse string
 	// Variable names.
@@ -203,17 +224,119 @@ func (r *routeRegexp) Match(req *http.Request, match *RouteMatch) bool {
 				host = host[:i]
 			}
 		}
-		return r.regexp.MatchString(host)
+		return r.matchString(host)
 	}
 
 	if r.regexpType == regexpTypeQuery {
 		return r.matchQueryString(req)
 	}
-	path := req.URL.Path
-	if r.options.useEncodedPath {
-		path = req.URL.EscapedPath()
+
+	path := r.subjectPath(req, match)
+	if r.isLiteral {
+		return r.matchLiteral(path)
 	}
-	return r.regexp.MatchString(path)
+	if matched, ok := match.pathMemo.lookup(r.pattern, path); ok {
+		return matched
+	}
+	matched := r.regexp.MatchString(path)
+	match.pathMemo.store(r.pattern, path, matched)
+	return matched
+}
+
+// subjectPath returns the request path this regexp matches against, reusing the
+// escaped form across the routes of a single match.
+func (r *routeRegexp) subjectPath(req *http.Request, match *RouteMatch) string {
+	if r.options.useEncodedPath {
+		return match.pathMemo.escapedPath(req.URL)
+	}
+	return req.URL.Path
+}
+
+// matchString reports whether s matches, using a string comparison when the
+// compiled regexp is an anchored literal.
+func (r *routeRegexp) matchString(s string) bool {
+	if r.isLiteral {
+		return r.matchLiteral(s)
+	}
+	return r.regexp.MatchString(s)
+}
+
+// matchLiteral is the regexp-free equivalent of matching a variable-free
+// template: "^" + QuoteMeta(literal) + optional "[/]?" + optional "$".
+func (r *routeRegexp) matchLiteral(s string) bool {
+	switch {
+	case r.regexpType == regexpTypePrefix:
+		return strings.HasPrefix(s, r.literal)
+	case s == r.literal:
+		return true
+	case r.options.strictSlash && len(s) == len(r.literal)+1 && s[len(s)-1] == '/':
+		return s[:len(s)-1] == r.literal
+	default:
+		return false
+	}
+}
+
+// pathMemo memoizes the path-matching work of a single Router.Match call.
+//
+// Two things make routers re-run the same path regexp against the same subject
+// many times per request. Routes are commonly registered against one path
+// template and discriminated by method, query or header matchers — the AIStor
+// S3 API has ~40 such routes for PUT alone. And every route in a subrouter
+// carries a copy of its ancestors' matchers, so each one re-evaluates the
+// prefixes that were already matched to reach it. Both collapse into a string
+// comparison here.
+//
+// Ancestor and leaf patterns alternate as the route list is walked, so the memo
+// holds several entries; the count only needs to cover the distinct path
+// patterns along one router nesting chain.
+type pathMemo struct {
+	// Escaped path, memoized against the URL it was derived from.
+	url         *url.URL
+	encodedPath string
+
+	// The subject every entry was evaluated against. Routes almost always
+	// agree on it, so it is held once rather than per entry; a route that
+	// disagrees (a differing useEncodedPath) resets the entries.
+	subject string
+	entries [4]pathMemoEntry
+	next    uint8
+}
+
+// pathMemoEntry needs no validity flag: every compiled pattern starts with "^",
+// so a zero-valued entry cannot be mistaken for a stored one.
+type pathMemoEntry struct {
+	pattern string
+	matched bool
+}
+
+func (m *pathMemo) escapedPath(u *url.URL) string {
+	if m.url != u {
+		m.url = u
+		m.encodedPath = u.EscapedPath()
+	}
+	return m.encodedPath
+}
+
+func (m *pathMemo) lookup(pattern, subject string) (matched, ok bool) {
+	if m.subject != subject {
+		return false, false
+	}
+	for i := range m.entries {
+		if e := &m.entries[i]; e.pattern == pattern {
+			return e.matched, true
+		}
+	}
+	return false, false
+}
+
+func (m *pathMemo) store(pattern, subject string, matched bool) {
+	if m.subject != subject {
+		m.subject = subject
+		m.entries = [len(m.entries)]pathMemoEntry{}
+		m.next = 0
+	}
+	m.entries[m.next] = pathMemoEntry{pattern: pattern, matched: matched}
+	m.next = (m.next + 1) % uint8(len(m.entries))
 }
 
 // url builds a URL part using the given values.
@@ -249,7 +372,7 @@ func (r *routeRegexp) url(values map[string]string) (string, error) {
 // For a URL with foo=bar&baz=ding, we return only the relevant key
 // value pair for the routeRegexp.
 func (r *routeRegexp) getURLQuery(req *http.Request) string {
-	if r.regexpType != regexpTypeQuery {
+	if r.regexpType != regexpTypeQuery || req.URL.RawQuery == "" {
 		return ""
 	}
 	val, ok := findFirstQueryKey(req.URL.RawQuery, r.templateKey)
@@ -297,7 +420,15 @@ func findFirstQueryKey(rawQuery, key string) (value string, ok bool) {
 }
 
 func (r *routeRegexp) matchQueryString(req *http.Request) bool {
-	return r.regexp.MatchString(r.getURLQuery(req))
+	query := r.getURLQuery(req)
+	if query == "" {
+		// The key is absent, so the subject is the empty string whatever the
+		// request holds and the result was settled at compile time. Routers
+		// commonly register many query-discriminated routes against one path,
+		// and a request naming none of those keys reaches every one of them.
+		return r.matchesEmpty
+	}
+	return r.regexp.MatchString(query)
 }
 
 // braceIndices returns the first level curly brace indices from a string.
@@ -361,7 +492,7 @@ func (v routeRegexpGroup) setMatch(req *http.Request, m *RouteMatch, r *Route) {
 	}
 	path := req.URL.Path
 	if r.useEncodedPath {
-		path = req.URL.EscapedPath()
+		path = m.pathMemo.escapedPath(req.URL)
 	}
 	// Store path variables.
 	if v.path != nil {
