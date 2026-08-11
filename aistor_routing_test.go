@@ -189,22 +189,5 @@ GET     /?events=x                                     ok=true  route=r113 vars=
 // every index, so the golden has to be regenerated wholesale and a diff only
 // carries meaning while the reproduction is untouched.
 func TestAIStorRouting(t *testing.T) {
-	got := dumpRouting(t)
-	want := strings.TrimPrefix(aistorRoutingGolden, "\n")
-	if got == want {
-		return
-	}
-	gotLines, wantLines := strings.Split(got, "\n"), strings.Split(want, "\n")
-	for i := 0; i < len(gotLines) || i < len(wantLines); i++ {
-		var g, w string
-		if i < len(gotLines) {
-			g = gotLines[i]
-		}
-		if i < len(wantLines) {
-			w = wantLines[i]
-		}
-		if g != w {
-			t.Errorf("line %d:\n got: %s\nwant: %s", i+1, g, w)
-		}
-	}
+	compareGolden(t, "s3 routing", dumpRouting(t), strings.TrimPrefix(aistorRoutingGolden, "\n"))
 }

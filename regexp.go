@@ -193,7 +193,7 @@ type routeRegexp struct {
 	// Expanded regexp.
 	regexp *regexp.Regexp
 	// The source pattern of regexp. Routes that share a template compile to
-	// the same pattern, which is what lets pathMemo reuse a match result
+	// the same pattern, which is what lets requestMemo reuse a match result
 	// across them.
 	pattern string
 	// Set when the template has no variables, so the compiled regexp is an
@@ -224,7 +224,15 @@ func (r *routeRegexp) Match(req *http.Request, match *RouteMatch) bool {
 				host = host[:i]
 			}
 		}
-		return r.matchString(host)
+		if r.isLiteral {
+			return r.matchLiteral(host)
+		}
+		if matched, ok := match.memo.host.lookup(r.pattern, host); ok {
+			return matched
+		}
+		matched := r.regexp.MatchString(host)
+		match.memo.host.store(r.pattern, host, matched)
+		return matched
 	}
 
 	if r.regexpType == regexpTypeQuery {
@@ -235,11 +243,11 @@ func (r *routeRegexp) Match(req *http.Request, match *RouteMatch) bool {
 	if r.isLiteral {
 		return r.matchLiteral(path)
 	}
-	if matched, ok := match.pathMemo.lookup(r.pattern, path); ok {
+	if matched, ok := match.memo.path.lookup(r.pattern, path); ok {
 		return matched
 	}
 	matched := r.regexp.MatchString(path)
-	match.pathMemo.store(r.pattern, path, matched)
+	match.memo.path.store(r.pattern, path, matched)
 	return matched
 }
 
@@ -247,18 +255,9 @@ func (r *routeRegexp) Match(req *http.Request, match *RouteMatch) bool {
 // escaped form across the routes of a single match.
 func (r *routeRegexp) subjectPath(req *http.Request, match *RouteMatch) string {
 	if r.options.useEncodedPath {
-		return match.pathMemo.escapedPath(req.URL)
+		return match.memo.escapedPath(req.URL)
 	}
 	return req.URL.Path
-}
-
-// matchString reports whether s matches, using a string comparison when the
-// compiled regexp is an anchored literal.
-func (r *routeRegexp) matchString(s string) bool {
-	if r.isLiteral {
-		return r.matchLiteral(s)
-	}
-	return r.regexp.MatchString(s)
 }
 
 // matchLiteral is the regexp-free equivalent of matching a variable-free
@@ -276,24 +275,39 @@ func (r *routeRegexp) matchLiteral(s string) bool {
 	}
 }
 
-// pathMemo memoizes the path-matching work of a single Router.Match call.
+// requestMemo memoizes the regexp work of a single Router.Match call.
 //
-// Two things make routers re-run the same path regexp against the same subject
-// many times per request. Routes are commonly registered against one path
+// Two things make routers re-run the same regexp against the same subject many
+// times per request. Routes are commonly registered against one path or host
 // template and discriminated by method, query or header matchers — the AIStor
 // S3 API has ~40 such routes for PUT alone. And every route in a subrouter
 // carries a copy of its ancestors' matchers, so each one re-evaluates the
-// prefixes that were already matched to reach it. Both collapse into a string
-// comparison here.
+// prefixes and hosts that were already matched to reach it. Both collapse into
+// a string comparison here.
 //
-// Ancestor and leaf patterns alternate as the route list is walked, so the memo
-// holds several entries; the count only needs to cover the distinct path
-// patterns along one router nesting chain.
-type pathMemo struct {
+// Paths and hosts are matched against different subjects, so each gets its own
+// table rather than evicting the other on every route.
+type requestMemo struct {
 	// Escaped path, memoized against the URL it was derived from.
 	url         *url.URL
 	encodedPath string
 
+	path pathMemo
+	host hostMemo
+}
+
+func (m *requestMemo) escapedPath(u *url.URL) string {
+	if m.url != u {
+		m.url = u
+		m.encodedPath = u.EscapedPath()
+	}
+	return m.encodedPath
+}
+
+// pathMemo holds several entries because ancestor and leaf path patterns
+// alternate as the route list is walked; the count only needs to cover the
+// distinct path patterns along one router nesting chain.
+type pathMemo struct {
 	// The subject every entry was evaluated against. Routes almost always
 	// agree on it, so it is held once rather than per entry; a route that
 	// disagrees (a differing useEncodedPath) resets the entries.
@@ -307,14 +321,6 @@ type pathMemo struct {
 type pathMemoEntry struct {
 	pattern string
 	matched bool
-}
-
-func (m *pathMemo) escapedPath(u *url.URL) string {
-	if m.url != u {
-		m.url = u
-		m.encodedPath = u.EscapedPath()
-	}
-	return m.encodedPath
 }
 
 func (m *pathMemo) lookup(pattern, subject string) (matched, ok bool) {
@@ -337,6 +343,29 @@ func (m *pathMemo) store(pattern, subject string, matched bool) {
 	}
 	m.entries[m.next] = pathMemoEntry{pattern: pattern, matched: matched}
 	m.next = (m.next + 1) % uint8(len(m.entries))
+}
+
+// hostMemo needs only one entry. A subrouter reached through a Host matcher
+// repeats that single host pattern across every one of its routes, and sibling
+// domains are each evaluated once on their own parent route, so there is nothing
+// for further entries to hold.
+type hostMemo struct {
+	subject string
+	pattern string
+	matched bool
+}
+
+func (m *hostMemo) lookup(pattern, subject string) (matched, ok bool) {
+	if m.pattern != pattern || m.subject != subject {
+		return false, false
+	}
+	return m.matched, true
+}
+
+func (m *hostMemo) store(pattern, subject string, matched bool) {
+	m.subject = subject
+	m.pattern = pattern
+	m.matched = matched
 }
 
 // url builds a URL part using the given values.
@@ -492,7 +521,7 @@ func (v routeRegexpGroup) setMatch(req *http.Request, m *RouteMatch, r *Route) {
 	}
 	path := req.URL.Path
 	if r.useEncodedPath {
-		path = m.pathMemo.escapedPath(req.URL)
+		path = m.memo.escapedPath(req.URL)
 	}
 	// Store path variables.
 	if v.path != nil {

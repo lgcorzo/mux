@@ -455,7 +455,7 @@ type RouteMatch struct {
 	// RouteMatch is valid for a single Match call against a single request;
 	// reusing one across requests already yields a stale Route, Handler, Vars
 	// and MatchErr, and would also serve a stale path here.
-	pathMemo pathMemo
+	memo requestMemo
 }
 
 type contextKey int

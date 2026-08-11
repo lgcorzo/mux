@@ -248,6 +248,59 @@ func Test_pathMemoStaleEntryAfterSubjectChange(t *testing.T) {
 	}
 }
 
+// Test_hostMemoDistinctDomains covers bucket DNS style addressing across several
+// domains. Each domain's host pattern is evaluated in turn, and the memo entry
+// left by a domain that did not match must not answer for the one that does.
+func Test_hostMemoDistinctDomains(t *testing.T) {
+	domains := []string{"s3.one.example", "s3.two.example", "s3.three.example"}
+
+	router := NewRouter()
+	for _, domain := range domains {
+		sub := router.Host("{bucket:.+}." + domain).Subrouter()
+		sub.Path("/{object:.+}").
+			Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).Name(domain)
+	}
+
+	for _, domain := range domains {
+		for _, host := range []string{"mybucket." + domain, "mybucket." + domain + ":9000"} {
+			req, err := http.NewRequest(http.MethodGet, "http://localhost/path/to/obj", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.URL.Scheme, req.URL.Host = "", ""
+			req.Host = host
+
+			var match RouteMatch
+			if !router.Match(req, &match) {
+				t.Fatalf("host %q: expected a match, got MatchErr %v", host, match.MatchErr)
+			}
+			if got := match.Route.GetName(); got != domain {
+				t.Errorf("host %q: matched route %q, want %q", host, got, domain)
+			}
+			if got, want := match.Vars["bucket"], "mybucket"; got != want {
+				t.Errorf("host %q: bucket = %q, want %q", host, got, want)
+			}
+			if got, want := match.Vars["object"], "path/to/obj"; got != want {
+				t.Errorf("host %q: object = %q, want %q", host, got, want)
+			}
+		}
+	}
+
+	// A host under none of the configured domains must not match, whatever the
+	// memo holds by the time it is evaluated.
+	req, err := http.NewRequest(http.MethodGet, "http://localhost/path/to/obj", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.URL.Scheme, req.URL.Host = "", ""
+	req.Host = "mybucket.s3.other.example"
+
+	var match RouteMatch
+	if router.Match(req, &match) {
+		t.Errorf("unconfigured host matched route %q", match.Route.GetName())
+	}
+}
+
 // Test_pathMemoDeepNesting checks that nesting deeper than the memo can hold
 // still routes correctly; exceeding its capacity may only cost extra regexp
 // executions, never change the outcome.

@@ -59,6 +59,91 @@ func registerAIStorAPIRouter(router *Router) {
 	apiRouter := router.PathPrefix("/").Subrouter()
 
 	bucketRouter := apiRouter.PathPrefix("/{bucket:[^_][^/]*}").Subrouter()
+	registerMockS3Routes(bucketRouter)
+	// Root operations.
+	apiRouter.Methods(http.MethodGet).Path("/").HandlerFunc(nopHandler).Queries("events", "{events:.*}")
+	apiRouter.Methods(http.MethodGet).Path("/").HandlerFunc(nopHandler)
+	apiRouter.Methods(http.MethodGet).Path("//").HandlerFunc(nopHandler)
+	apiRouter.Methods(http.MethodOptions).HandlerFunc(nopHandler)
+}
+
+func newAIStorRouter() *Router {
+	router := NewRouter().SkipClean(true).UseEncodedPath()
+	registerAIStorAPIRouter(router)
+	return router
+}
+
+var aistorBenchCases = []struct {
+	name    string
+	method  string
+	target  string
+	headers map[string]string
+}{
+	{name: "HeadObject", method: http.MethodHead, target: "/testbucket/path/to/my-object.dat"},
+	{name: "GetObject", method: http.MethodGet, target: "/testbucket/path/to/my-object.dat"},
+	{name: "PutObject", method: http.MethodPut, target: "/testbucket/path/to/my-object.dat"},
+	{name: "DeleteObject", method: http.MethodDelete, target: "/testbucket/path/to/my-object.dat"},
+	{name: "PutObjectPart", method: http.MethodPut, target: "/testbucket/path/to/my-object.dat?partNumber=3&uploadId=abc123"},
+	{name: "ListObjectsV2", method: http.MethodGet, target: "/testbucket?list-type=2&prefix=path%2Fto&max-keys=1000"},
+	{name: "ListBuckets", method: http.MethodGet, target: "/"},
+	{name: "NotFound", method: http.MethodPatch, target: "/testbucket/path/to/my-object.dat"},
+}
+
+func BenchmarkAIStorRouter(b *testing.B) {
+	router := newAIStorRouter()
+	for _, tc := range aistorBenchCases {
+		req, err := http.NewRequest(tc.method, tc.target, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for k, v := range tc.headers {
+			req.Header.Set(k, v)
+		}
+		var match RouteMatch
+		matched := router.Match(req, &match)
+		if tc.name == "NotFound" {
+			if matched || match.MatchErr != ErrMethodMismatch {
+				b.Fatalf("%s: expected a method mismatch, got matched=%v err=%v", tc.name, matched, match.MatchErr)
+			}
+		} else if !matched || match.MatchErr != nil {
+			b.Fatalf("%s: no route matched (err %v)", tc.name, match.MatchErr)
+		}
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				var match RouteMatch
+				router.Match(req, &match)
+			}
+		})
+	}
+}
+
+func BenchmarkAIStorRouterServeHTTP(b *testing.B) {
+	router := newAIStorRouter()
+	for _, tc := range aistorBenchCases {
+		req, err := http.NewRequest(tc.method, tc.target, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for k, v := range tc.headers {
+			req.Header.Set(k, v)
+		}
+		b.Run(tc.name, func(b *testing.B) {
+			w := newTestResponseWriter()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				router.ServeHTTP(w, req)
+			}
+		})
+	}
+}
+
+// registerMockS3Routes registers the S3 API route set, in AIStor's registration
+// order, on one bucket subrouter. AIStor runs the equivalent loop body once per
+// bucket DNS style subrouter and once for the path style subrouter.
+func registerMockS3Routes(bucketRouter *Router) {
 
 	for _, r := range benchRejectedObjAPIs {
 		t := bucketRouter.Methods(r.methods...).HandlerFunc(nopHandler).Queries(r.queries...)
@@ -193,83 +278,4 @@ func registerAIStorAPIRouter(router *Router) {
 	// ListObjectsV1.
 	bucketRouter.Methods(http.MethodGet).HandlerFunc(nopHandler)
 	bucketRouter.Methods(http.MethodOptions).HandlerFunc(nopHandler)
-
-	// Root operations.
-	apiRouter.Methods(http.MethodGet).Path("/").HandlerFunc(nopHandler).Queries("events", "{events:.*}")
-	apiRouter.Methods(http.MethodGet).Path("/").HandlerFunc(nopHandler)
-	apiRouter.Methods(http.MethodGet).Path("//").HandlerFunc(nopHandler)
-	apiRouter.Methods(http.MethodOptions).HandlerFunc(nopHandler)
-}
-
-func newAIStorRouter() *Router {
-	router := NewRouter().SkipClean(true).UseEncodedPath()
-	registerAIStorAPIRouter(router)
-	return router
-}
-
-var aistorBenchCases = []struct {
-	name    string
-	method  string
-	target  string
-	headers map[string]string
-}{
-	{name: "HeadObject", method: http.MethodHead, target: "/testbucket/path/to/my-object.dat"},
-	{name: "GetObject", method: http.MethodGet, target: "/testbucket/path/to/my-object.dat"},
-	{name: "PutObject", method: http.MethodPut, target: "/testbucket/path/to/my-object.dat"},
-	{name: "DeleteObject", method: http.MethodDelete, target: "/testbucket/path/to/my-object.dat"},
-	{name: "PutObjectPart", method: http.MethodPut, target: "/testbucket/path/to/my-object.dat?partNumber=3&uploadId=abc123"},
-	{name: "ListObjectsV2", method: http.MethodGet, target: "/testbucket?list-type=2&prefix=path%2Fto&max-keys=1000"},
-	{name: "ListBuckets", method: http.MethodGet, target: "/"},
-	{name: "NotFound", method: http.MethodPatch, target: "/testbucket/path/to/my-object.dat"},
-}
-
-func BenchmarkAIStorRouter(b *testing.B) {
-	router := newAIStorRouter()
-	for _, tc := range aistorBenchCases {
-		req, err := http.NewRequest(tc.method, tc.target, nil)
-		if err != nil {
-			b.Fatal(err)
-		}
-		for k, v := range tc.headers {
-			req.Header.Set(k, v)
-		}
-		var match RouteMatch
-		matched := router.Match(req, &match)
-		if tc.name == "NotFound" {
-			if matched || match.MatchErr != ErrMethodMismatch {
-				b.Fatalf("%s: expected a method mismatch, got matched=%v err=%v", tc.name, matched, match.MatchErr)
-			}
-		} else if !matched || match.MatchErr != nil {
-			b.Fatalf("%s: no route matched (err %v)", tc.name, match.MatchErr)
-		}
-		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				var match RouteMatch
-				router.Match(req, &match)
-			}
-		})
-	}
-}
-
-func BenchmarkAIStorRouterServeHTTP(b *testing.B) {
-	router := newAIStorRouter()
-	for _, tc := range aistorBenchCases {
-		req, err := http.NewRequest(tc.method, tc.target, nil)
-		if err != nil {
-			b.Fatal(err)
-		}
-		for k, v := range tc.headers {
-			req.Header.Set(k, v)
-		}
-		b.Run(tc.name, func(b *testing.B) {
-			w := newTestResponseWriter()
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				router.ServeHTTP(w, req)
-			}
-		})
-	}
 }
