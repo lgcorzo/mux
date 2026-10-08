@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/minio/mux"
+	"github.com/lgcorzo/mux"
 )
 
 // Define our struct

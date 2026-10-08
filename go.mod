@@ -1,4 +1,4 @@
-module github.com/minio/mux
+module github.com/lgcorzo/mux
 
 go 1.26
 
