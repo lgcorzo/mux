@@ -2,7 +2,7 @@ package mux_test
 
 import (
 	"fmt"
-	"github.com/minio/mux"
+	"github.com/lgcorzo/mux"
 )
 
 // This example demonstrates building a dynamic URL using
