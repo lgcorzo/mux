@@ -253,7 +253,7 @@ func newAIStorFullRouter(domains []string, kubernetes bool) *Router {
 
 func countRoutes(router *Router) int {
 	n := 0
-	router.Walk(func(*Route, *Router, []*Route) error {
+	_ = router.Walk(func(*Route, *Router, []*Route) error {
 		n++
 		return nil
 	})

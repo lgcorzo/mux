@@ -12,7 +12,7 @@ import (
 // routing decision can be compared as a stable string.
 func nameRoutesByIndex(r *Router) {
 	i := 0
-	r.Walk(func(route *Route, _ *Router, _ []*Route) error {
+	_ = r.Walk(func(route *Route, _ *Router, _ []*Route) error {
 		route.name = fmt.Sprintf("r%03d", i)
 		i++
 		return nil
