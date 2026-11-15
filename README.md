@@ -1,3 +1,5 @@
+Maintained fork of [minio/mux](https://github.com/minio/mux). It applies security patches and maintenance fixes on top of upstream. Part of the [Dark Gravity](https://github.com/lgcorzo/rust_CACD_autonomous_factory) factory. License: BSD-3-Clause.
+
 # lgcorzo/mux
 
 ![testing](https://github.com/lgcorzo/mux/actions/workflows/test.yml/badge.svg)
@@ -647,3 +649,10 @@ func main() {
 ## License
 
 BSD licensed. See the [LICENSE](LICENSE) file for details.
+
+---
+
+### Fork Maintenance & Agent Transparency
+
+- **Changes vs. Upstream:** Security dependency updates, CI/CD workflow fixes, and CodeQL remediation are tracked in the [commit history](https://github.com/lgcorzo/mux/commits) and [Pull Requests](https://github.com/lgcorzo/mux/pulls?q=is%3Apr).
+- **Agent Tagging (`[agent]`):** Commits and pull requests generated automatically by agents in the Dark Gravity pipeline are prefixed with `[agent]` to distinguish automated maintenance from manual work.
